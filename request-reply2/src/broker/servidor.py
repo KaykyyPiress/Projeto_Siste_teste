@@ -11,7 +11,7 @@ STATE_FILE = Path("state.msgpack")
 USERNAME_REGEX = re.compile(r"^[a-zA-Z0-9_]{3,20}$")
 CHANNEL_REGEX = re.compile(r"^[a-zA-Z0-9_-]{3,50}$")
 DEFAULT_STATE = {"logins": [], "channels": [], "publications": []}
-HEARTBEAT_EVERY_MESSAGES = 10
+SYNC_EVERY_MESSAGES = 15
 
 
 class LamportClock:
@@ -162,10 +162,10 @@ def main():
     state = load_state()
 
     lamport_clock = LamportClock()
-    clock_offset = 0.0
+    coordinator = None
 
     def now_synced():
-        return time.time() + clock_offset
+        return time.time()
 
     context = zmq.Context()
 
@@ -174,6 +174,9 @@ def main():
 
     pub_socket = context.socket(zmq.PUB)
     pub_socket.connect("tcp://pubsub-proxy:5557")
+    sub_socket = context.socket(zmq.SUB)
+    sub_socket.connect("tcp://pubsub-proxy:5558")
+    sub_socket.setsockopt_string(zmq.SUBSCRIBE, "servers")
 
     ref_socket = context.socket(zmq.REQ)
     ref_socket.connect("tcp://reference:5559")
@@ -184,8 +187,7 @@ def main():
 
     register_reply = call_reference({"type": "register", "name": server_name})
     server_rank = register_reply.get("rank", -1)
-    nonlocal_offset = register_reply.get("reference_time", time.time()) - time.time()
-    clock_offset = nonlocal_offset
+    coordinator = server_name
 
     print(
         f"[SERVIDOR] {server_name} rank={server_rank}. "
@@ -193,7 +195,20 @@ def main():
         flush=True,
     )
 
-    messages_since_hb = 0
+    messages_since_sync = 0
+
+    def refresh_coordinator():
+        nonlocal coordinator
+        info = call_reference({"type": "list"})
+        servers = info.get("servers", [])
+        if not servers:
+            coordinator = server_name
+            return
+        elected = min(servers, key=lambda s: int(s.get("rank", 10**9)))
+        previous = coordinator
+        coordinator = elected.get("name", server_name)
+        if previous != coordinator and coordinator == server_name:
+            pub_socket.send_multipart([b"servers", msgpack.packb({"coordinator": server_name}, use_bin_type=True)])
 
     while True:
         try:
@@ -215,13 +230,11 @@ def main():
                 response = make_response("error", lamport_clock, now_synced, {"message": f"Operacao desconhecida: {msg_type}"})
 
             rep_socket.send(msgpack.packb(response, use_bin_type=True))
-
-            messages_since_hb += 1
-            if messages_since_hb >= HEARTBEAT_EVERY_MESSAGES:
-                hb_reply = call_reference({"type": "heartbeat", "name": server_name, "rank": server_rank})
-                if hb_reply.get("status") == "ok":
-                    clock_offset = hb_reply.get("reference_time", time.time()) - time.time()
-                messages_since_hb = 0
+            call_reference({"type": "heartbeat", "name": server_name, "rank": server_rank})
+            messages_since_sync += 1
+            if messages_since_sync >= SYNC_EVERY_MESSAGES:
+                refresh_coordinator()
+                messages_since_sync = 0
         except Exception as exc:
             print(f"[SERVIDOR] Erro inesperado: {exc}", flush=True)
             rep_socket.send(

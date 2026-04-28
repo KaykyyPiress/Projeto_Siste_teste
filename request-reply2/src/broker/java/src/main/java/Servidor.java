@@ -18,10 +18,10 @@ public class Servidor {
     private static final Path STATE_FILE = Path.of("/data/state_java.msgpack");
     private static final Pattern USER_REGEX = Pattern.compile("^[a-zA-Z0-9_]{3,20}$");
     private static final Pattern CHAN_REGEX = Pattern.compile("^[a-zA-Z0-9_-]{3,50}$");
-    private static final int HEARTBEAT_EVERY_MESSAGES = 10;
+    private static final int SYNC_EVERY_MESSAGES = 15;
 
     private static long logicalClock = 0;
-    private static double clockOffset = 0.0;
+    private static String coordinatorName = "";
 
     public static void main(String[] args) throws Exception {
         Map<String, Object> state = loadState();
@@ -39,14 +39,14 @@ public class Servidor {
 
             Map<String, Object> registerReply = callReference(refSocket, mapOf("type", "register", "name", serverName));
             int serverRank = ((Number) registerReply.getOrDefault("rank", -1)).intValue();
-            updateClockOffset(registerReply);
+            coordinatorName = serverName;
 
             System.out.println("[SERVIDOR-JAVA] " + serverName + " rank=" + serverRank
                 + " | Estado: " + getList(state, "logins").size() + " login(s), "
                 + getList(state, "channels").size() + " canal(is), "
                 + getList(state, "publications").size() + " publicacao(oes).");
 
-            int messagesSinceHeartbeat = 0;
+            int messagesSinceSync = 0;
 
             while (!Thread.currentThread().isInterrupted()) {
                 byte[] raw = repSocket.recv();
@@ -76,14 +76,11 @@ public class Servidor {
                 }
                 repSocket.send(MsgHelper.pack(response));
 
-                messagesSinceHeartbeat++;
-                if (messagesSinceHeartbeat >= HEARTBEAT_EVERY_MESSAGES) {
-                    Map<String, Object> hbReply = callReference(
-                        refSocket,
-                        mapOf("type", "heartbeat", "name", serverName, "rank", serverRank)
-                    );
-                    updateClockOffset(hbReply);
-                    messagesSinceHeartbeat = 0;
+                callReference(refSocket, mapOf("type", "heartbeat", "name", serverName, "rank", serverRank));
+                messagesSinceSync++;
+                if (messagesSinceSync >= SYNC_EVERY_MESSAGES) {
+                    refreshCoordinator(refSocket, serverName);
+                    messagesSinceSync = 0;
                 }
             }
         }
@@ -188,15 +185,29 @@ public class Servidor {
         return logicalClock;
     }
 
-    private static void updateClockOffset(Map<String, Object> reply) {
-        Object ref = reply.get("reference_time");
-        if (ref instanceof Number) {
-            clockOffset = ((Number) ref).doubleValue() - (System.currentTimeMillis() / 1000.0);
+    @SuppressWarnings("unchecked")
+    private static void refreshCoordinator(ZMQ.Socket refSocket, String serverName) throws Exception {
+        Map<String, Object> listReply = callReference(refSocket, mapOf("type", "list"));
+        List<Object> servers = (List<Object>) listReply.getOrDefault("servers", new ArrayList<>());
+        int bestRank = Integer.MAX_VALUE;
+        String elected = serverName;
+        for (Object entry : servers) {
+            if (entry instanceof Map<?, ?> e) {
+                Object rankObj = e.containsKey("rank") ? e.get("rank") : Integer.MAX_VALUE;
+                int rank = ((Number) rankObj).intValue();
+                Object nameObj = e.containsKey("name") ? e.get("name") : serverName;
+                String name = nameObj.toString();
+                if (rank < bestRank) {
+                    bestRank = rank;
+                    elected = name;
+                }
+            }
         }
+        coordinatorName = elected;
     }
 
     private static double now() {
-        return (System.currentTimeMillis() / 1000.0) + clockOffset;
+        return (System.currentTimeMillis() / 1000.0);
     }
 
     private static Map<String, Object> map(String k, Object v) {
