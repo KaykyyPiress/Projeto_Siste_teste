@@ -18,10 +18,11 @@ public class Servidor {
     private static final Path STATE_FILE = Path.of("/data/state_java.msgpack");
     private static final Pattern USER_REGEX = Pattern.compile("^[a-zA-Z0-9_]{3,20}$");
     private static final Pattern CHAN_REGEX = Pattern.compile("^[a-zA-Z0-9_-]{3,50}$");
-    private static final int HEARTBEAT_EVERY_MESSAGES = 10;
+    private static final int SYNC_EVERY_MESSAGES = 15;
+    private static final String STATE_SYNC_TOPIC = "servers.state";
 
     private static long logicalClock = 0;
-    private static double clockOffset = 0.0;
+    private static String coordinatorName = "";
 
     public static void main(String[] args) throws Exception {
         Map<String, Object> state = loadState();
@@ -33,23 +34,27 @@ public class Servidor {
 
             ZMQ.Socket pubSocket = ctx.createSocket(SocketType.PUB);
             pubSocket.connect("tcp://pubsub-proxy:5557");
+            ZMQ.Socket subSocket = ctx.createSocket(SocketType.SUB);
+            subSocket.connect("tcp://pubsub-proxy:5558");
+            subSocket.subscribe(STATE_SYNC_TOPIC.getBytes(StandardCharsets.UTF_8));
 
             ZMQ.Socket refSocket = ctx.createSocket(SocketType.REQ);
             refSocket.connect("tcp://reference:5559");
 
             Map<String, Object> registerReply = callReference(refSocket, mapOf("type", "register", "name", serverName));
             int serverRank = ((Number) registerReply.getOrDefault("rank", -1)).intValue();
-            updateClockOffset(registerReply);
+            coordinatorName = serverName;
 
             System.out.println("[SERVIDOR-JAVA] " + serverName + " rank=" + serverRank
                 + " | Estado: " + getList(state, "logins").size() + " login(s), "
                 + getList(state, "channels").size() + " canal(is), "
                 + getList(state, "publications").size() + " publicacao(oes).");
 
-            int messagesSinceHeartbeat = 0;
+            int messagesSinceSync = 0;
 
             while (!Thread.currentThread().isInterrupted()) {
                 byte[] raw = repSocket.recv();
+                drainStateSync(subSocket, state);
                 Map<String, Object> msg = MsgHelper.unpack(raw);
                 mergeClock(msg.get("logical_clock"));
 
@@ -63,6 +68,14 @@ public class Servidor {
                         break;
                     case "create_channel":
                         response = handleCreateChannel(msg, state);
+                        if ("ok".equals(response.get("status"))) {
+                            @SuppressWarnings("unchecked")
+                            Map<String, Object> payload = (Map<String, Object>) msg.getOrDefault("payload", new HashMap<>());
+                            String createdChannel = payload.getOrDefault("channel", "").toString().trim();
+                            Map<String, Object> evt = mapOf("type", "channel_created", "channel", createdChannel);
+                            pubSocket.sendMore(STATE_SYNC_TOPIC.getBytes(StandardCharsets.UTF_8));
+                            pubSocket.send(MsgHelper.pack(evt));
+                        }
                         break;
                     case "list_channels":
                         response = handleListChannels(state);
@@ -76,14 +89,11 @@ public class Servidor {
                 }
                 repSocket.send(MsgHelper.pack(response));
 
-                messagesSinceHeartbeat++;
-                if (messagesSinceHeartbeat >= HEARTBEAT_EVERY_MESSAGES) {
-                    Map<String, Object> hbReply = callReference(
-                        refSocket,
-                        mapOf("type", "heartbeat", "name", serverName, "rank", serverRank)
-                    );
-                    updateClockOffset(hbReply);
-                    messagesSinceHeartbeat = 0;
+                callReference(refSocket, mapOf("type", "heartbeat", "name", serverName, "rank", serverRank));
+                messagesSinceSync++;
+                if (messagesSinceSync >= SYNC_EVERY_MESSAGES) {
+                    refreshCoordinator(refSocket, serverName);
+                    messagesSinceSync = 0;
                 }
             }
         }
@@ -188,15 +198,49 @@ public class Servidor {
         return logicalClock;
     }
 
-    private static void updateClockOffset(Map<String, Object> reply) {
-        Object ref = reply.get("reference_time");
-        if (ref instanceof Number) {
-            clockOffset = ((Number) ref).doubleValue() - (System.currentTimeMillis() / 1000.0);
+    @SuppressWarnings("unchecked")
+    private static void refreshCoordinator(ZMQ.Socket refSocket, String serverName) throws Exception {
+        Map<String, Object> listReply = callReference(refSocket, mapOf("type", "list"));
+        List<Object> servers = (List<Object>) listReply.getOrDefault("servers", new ArrayList<>());
+        int bestRank = Integer.MAX_VALUE;
+        String elected = serverName;
+        for (Object entry : servers) {
+            if (entry instanceof Map<?, ?> e) {
+                Object rankObj = e.containsKey("rank") ? e.get("rank") : Integer.MAX_VALUE;
+                int rank = ((Number) rankObj).intValue();
+                Object nameObj = e.containsKey("name") ? e.get("name") : serverName;
+                String name = nameObj.toString();
+                if (rank < bestRank) {
+                    bestRank = rank;
+                    elected = name;
+                }
+            }
         }
+        coordinatorName = elected;
     }
 
     private static double now() {
-        return (System.currentTimeMillis() / 1000.0) + clockOffset;
+        return (System.currentTimeMillis() / 1000.0);
+    }
+
+    @SuppressWarnings("unchecked")
+    private static void drainStateSync(ZMQ.Socket subSocket, Map<String, Object> state) throws Exception {
+        while (true) {
+            byte[] topic = subSocket.recv(ZMQ.DONTWAIT);
+            if (topic == null) return;
+            byte[] payload = subSocket.recv();
+            String topicStr = new String(topic, StandardCharsets.UTF_8);
+            if (!STATE_SYNC_TOPIC.equals(topicStr)) continue;
+            Map<String, Object> event = MsgHelper.unpack(payload);
+            if (!"channel_created".equals(event.get("type"))) continue;
+            String channel = event.getOrDefault("channel", "").toString().trim();
+            if (channel.isEmpty()) continue;
+            List<Object> channels = getList(state, "channels");
+            if (!channels.contains(channel)) {
+                channels.add(channel);
+                saveState(state);
+            }
+        }
     }
 
     private static Map<String, Object> map(String k, Object v) {
