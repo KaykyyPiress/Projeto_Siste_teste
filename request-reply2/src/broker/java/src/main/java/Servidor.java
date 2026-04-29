@@ -19,6 +19,7 @@ public class Servidor {
     private static final Pattern USER_REGEX = Pattern.compile("^[a-zA-Z0-9_]{3,20}$");
     private static final Pattern CHAN_REGEX = Pattern.compile("^[a-zA-Z0-9_-]{3,50}$");
     private static final int SYNC_EVERY_MESSAGES = 15;
+    private static final String STATE_SYNC_TOPIC = "servers.state";
 
     private static long logicalClock = 0;
     private static String coordinatorName = "";
@@ -33,6 +34,9 @@ public class Servidor {
 
             ZMQ.Socket pubSocket = ctx.createSocket(SocketType.PUB);
             pubSocket.connect("tcp://pubsub-proxy:5557");
+            ZMQ.Socket subSocket = ctx.createSocket(SocketType.SUB);
+            subSocket.connect("tcp://pubsub-proxy:5558");
+            subSocket.subscribe(STATE_SYNC_TOPIC.getBytes(StandardCharsets.UTF_8));
 
             ZMQ.Socket refSocket = ctx.createSocket(SocketType.REQ);
             refSocket.connect("tcp://reference:5559");
@@ -50,6 +54,7 @@ public class Servidor {
 
             while (!Thread.currentThread().isInterrupted()) {
                 byte[] raw = repSocket.recv();
+                drainStateSync(subSocket, state);
                 Map<String, Object> msg = MsgHelper.unpack(raw);
                 mergeClock(msg.get("logical_clock"));
 
@@ -63,6 +68,14 @@ public class Servidor {
                         break;
                     case "create_channel":
                         response = handleCreateChannel(msg, state);
+                        if ("ok".equals(response.get("status"))) {
+                            @SuppressWarnings("unchecked")
+                            Map<String, Object> payload = (Map<String, Object>) msg.getOrDefault("payload", new HashMap<>());
+                            String createdChannel = payload.getOrDefault("channel", "").toString().trim();
+                            Map<String, Object> evt = mapOf("type", "channel_created", "channel", createdChannel);
+                            pubSocket.sendMore(STATE_SYNC_TOPIC.getBytes(StandardCharsets.UTF_8));
+                            pubSocket.send(MsgHelper.pack(evt));
+                        }
                         break;
                     case "list_channels":
                         response = handleListChannels(state);
@@ -208,6 +221,26 @@ public class Servidor {
 
     private static double now() {
         return (System.currentTimeMillis() / 1000.0);
+    }
+
+    @SuppressWarnings("unchecked")
+    private static void drainStateSync(ZMQ.Socket subSocket, Map<String, Object> state) throws Exception {
+        while (true) {
+            byte[] topic = subSocket.recv(ZMQ.DONTWAIT);
+            if (topic == null) return;
+            byte[] payload = subSocket.recv();
+            String topicStr = new String(topic, StandardCharsets.UTF_8);
+            if (!STATE_SYNC_TOPIC.equals(topicStr)) continue;
+            Map<String, Object> event = MsgHelper.unpack(payload);
+            if (!"channel_created".equals(event.get("type"))) continue;
+            String channel = event.getOrDefault("channel", "").toString().trim();
+            if (channel.isEmpty()) continue;
+            List<Object> channels = getList(state, "channels");
+            if (!channels.contains(channel)) {
+                channels.add(channel);
+                saveState(state);
+            }
+        }
     }
 
     private static Map<String, Object> map(String k, Object v) {

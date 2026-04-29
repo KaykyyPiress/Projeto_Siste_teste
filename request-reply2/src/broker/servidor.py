@@ -12,6 +12,7 @@ USERNAME_REGEX = re.compile(r"^[a-zA-Z0-9_]{3,20}$")
 CHANNEL_REGEX = re.compile(r"^[a-zA-Z0-9_-]{3,50}$")
 DEFAULT_STATE = {"logins": [], "channels": [], "publications": []}
 SYNC_EVERY_MESSAGES = 15
+STATE_SYNC_TOPIC = "servers.state"
 
 
 class LamportClock:
@@ -108,6 +109,15 @@ def handle_create_channel(msg, state, lamport_clock, now_fn):
     return make_response("ok", lamport_clock, now_fn, {"message": f"Canal {channel} criado com sucesso."})
 
 
+def apply_state_sync_event(event, state):
+    if event.get("type") != "channel_created":
+        return
+    channel = str(event.get("channel", "")).strip()
+    if channel and channel not in state["channels"]:
+        state["channels"].append(channel)
+        save_state(state)
+
+
 def handle_list_channels(state, lamport_clock, now_fn):
     channels = state.get("channels", [])
     print(f"[LISTAR CANAIS] Enviando {len(channels)} canal(is).", flush=True)
@@ -177,6 +187,7 @@ def main():
     sub_socket = context.socket(zmq.SUB)
     sub_socket.connect("tcp://pubsub-proxy:5558")
     sub_socket.setsockopt_string(zmq.SUBSCRIBE, "servers")
+    sub_socket.setsockopt_string(zmq.SUBSCRIBE, STATE_SYNC_TOPIC)
 
     ref_socket = context.socket(zmq.REQ)
     ref_socket.connect("tcp://reference:5559")
@@ -212,6 +223,14 @@ def main():
 
     while True:
         try:
+            while True:
+                try:
+                    topic, raw_event = sub_socket.recv_multipart(flags=zmq.NOBLOCK)
+                    if topic.decode("utf-8") == STATE_SYNC_TOPIC:
+                        apply_state_sync_event(msgpack.unpackb(raw_event, raw=False), state)
+                except zmq.Again:
+                    break
+
             raw = rep_socket.recv()
             msg = msgpack.unpackb(raw, raw=False)
             lamport_clock.merge(msg.get("logical_clock", 0))
@@ -222,6 +241,14 @@ def main():
                 response = handle_login(msg, state, lamport_clock, now_synced)
             elif msg_type == "create_channel":
                 response = handle_create_channel(msg, state, lamport_clock, now_synced)
+                if response.get("status") == "ok":
+                    created_channel = msg.get("payload", {}).get("channel", "").strip()
+                    pub_socket.send_multipart(
+                        [
+                            STATE_SYNC_TOPIC.encode("utf-8"),
+                            msgpack.packb({"type": "channel_created", "channel": created_channel}, use_bin_type=True),
+                        ]
+                    )
             elif msg_type == "list_channels":
                 response = handle_list_channels(state, lamport_clock, now_synced)
             elif msg_type == "publish_message":
