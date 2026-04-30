@@ -1,4 +1,5 @@
 import org.zeromq.SocketType;
+// Reescrito para reduzir conflitos de merge na Parte 4.
 import org.zeromq.ZContext;
 import org.zeromq.ZMQ;
 

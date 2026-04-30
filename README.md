@@ -1,4 +1,5 @@
 # Projeto de Sistemas Distribuídos – Parte 4
+<!-- Arquivo reescrito para estabilizar merge da Parte 4 -->
 
 ## Objetivo
 

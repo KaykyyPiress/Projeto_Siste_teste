@@ -1,4 +1,5 @@
 import os
+# Reescrito para reduzir conflitos de merge na Parte 4.
 import re
 import socket as pysocket
 import time

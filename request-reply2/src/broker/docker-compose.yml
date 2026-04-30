@@ -1,4 +1,5 @@
 services:
+  # Reescrito para reduzir conflitos de merge na Parte 4.
 
   broker:
     build:
