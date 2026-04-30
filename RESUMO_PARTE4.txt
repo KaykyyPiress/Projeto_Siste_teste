@@ -1,0 +1,46 @@
+Projeto de Sistemas Distribuídos – Resumo da Parte 4
+
+1) O que mudou nos servidores
+
+- Foi adicionada coordenação entre servidores (Python e Java) com comunicação peer-to-peer via REQ/REP.
+- Foi adicionada sincronização de estado de canais entre servidores pelo tópico Pub/Sub "servers.state".
+- A cada criação de canal, o servidor publica um evento "channel_created" para os outros servidores aplicarem localmente.
+- Isso evita o erro intermitente "Canal ... nao existe" quando o broker distribui create_channel e publish_message para instâncias diferentes.
+- A rotina de sincronização/coordenador usa intervalo de 15 mensagens (SYNC_EVERY_MESSAGES = 15).
+- Os timestamps físicos passaram a ser locais (time.time no Python / System.currentTimeMillis no Java), mantendo relógio lógico de Lamport.
+
+2) Rank e referência
+
+- O serviço reference atribui rank no register.
+- Rank é um identificador de prioridade/ordem de servidores no cluster.
+- O reference também mantém presença (heartbeat) e lista de servidores ativos.
+- Para permitir comunicação direta entre servidores, reference armazena host e peer_port de cada servidor.
+
+3) Fluxo funcional atual
+
+- Servidor sobe, faz register no reference e recebe rank.
+- Servidor envia heartbeat continuamente para permanecer ativo na lista.
+- Cliente envia requisições ao broker (login/list/create/publish) e o broker balanceia entre servidores.
+- Em create_channel bem-sucedido, servidor publica "channel_created" em "servers.state".
+- Outros servidores recebem esse evento e atualizam seu estado local de canais.
+- Em publish_message, qualquer servidor que receber a requisição já reconhece o canal sincronizado.
+
+4) Arquivos alterados para a Parte 4
+
+- README.md
+- request-reply2/src/broker/docker-compose.yml
+- request-reply2/src/broker/reference.py
+- request-reply2/src/broker/servidor.py
+- request-reply2/src/broker/java/src/main/java/Servidor.java
+
+5) Leitura dos logs (como interpretar)
+
+- "[REFERENCE] Serviço de referência iniciado...": catálogo de servidores ativo.
+- "servidor-py rank=1" / "servidor-java rank=2": ranks atribuídos pelo register.
+- "type=create_channel" + "[CANAL] ... criou": canal criado no servidor que recebeu a requisição.
+- "[SUB]" e "[SUB-JAVA]": clientes recebendo publicações do plano de dados Pub/Sub.
+- Ausência de "Canal ... nao existe": sinal de que a sincronização de canais entre servidores está funcionando.
+
+6) Observação
+
+- O comportamento foi ajustado para atender a Parte 4 com foco em coordenação distribuída, descoberta de peers e consistência de canais entre servidores heterogêneos (Python/Java).
