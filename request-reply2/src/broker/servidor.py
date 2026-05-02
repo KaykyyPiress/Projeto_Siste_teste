@@ -112,11 +112,20 @@ def handle_create_channel(msg, state, lamport_clock, now_fn):
 
 
 def apply_state_sync_event(event, state):
-    if event.get("type") != "channel_created":
-        return
-    channel = str(event.get("channel", "")).strip()
-    if channel and channel not in state["channels"]:
-        state["channels"].append(channel)
+    event_type = event.get("type")
+    changed = False
+    if event_type == "channel_created":
+        channel = str(event.get("channel", "")).strip()
+        if channel and channel not in state["channels"]:
+            state["channels"].append(channel)
+            changed = True
+    elif event_type == "channels_snapshot":
+        for channel in event.get("channels", []):
+            channel = str(channel).strip()
+            if channel and channel not in state["channels"]:
+                state["channels"].append(channel)
+                changed = True
+    if changed:
         save_state(state)
 
 
@@ -264,6 +273,12 @@ def main():
             reply = peer_request(target, {"type": "berkeley_time_request", "from": server_name}) if target else None
             if not reply or "reference_time" not in reply:
                 start_election(servers)
+        pub_socket.send_multipart(
+            [
+                STATE_SYNC_TOPIC.encode("utf-8"),
+                msgpack.packb({"type": "channels_snapshot", "channels": list(state.get("channels", []))}, use_bin_type=True),
+            ]
+        )
 
     while True:
         try:

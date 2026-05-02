@@ -101,6 +101,7 @@ public class Servidor {
                 messagesSinceSync++;
                 if (messagesSinceSync >= SYNC_EVERY_MESSAGES) {
                     refreshCoordinator(refSocket, serverName);
+                    publishChannelsSnapshot(pubSocket, state);
                     messagesSinceSync = 0;
                 }
             }
@@ -305,15 +306,38 @@ public class Servidor {
             String topicStr = new String(topic, StandardCharsets.UTF_8);
             if (!STATE_SYNC_TOPIC.equals(topicStr)) continue;
             Map<String, Object> event = MsgHelper.unpack(payload);
-            if (!"channel_created".equals(event.get("type"))) continue;
-            String channel = event.getOrDefault("channel", "").toString().trim();
-            if (channel.isEmpty()) continue;
             List<Object> channels = getList(state, "channels");
-            if (!channels.contains(channel)) {
-                channels.add(channel);
+            boolean changed = false;
+            if ("channel_created".equals(event.get("type"))) {
+                String channel = event.getOrDefault("channel", "").toString().trim();
+                if (!channel.isEmpty() && !channels.contains(channel)) {
+                    channels.add(channel);
+                    changed = true;
+                }
+            } else if ("channels_snapshot".equals(event.get("type"))) {
+                Object rawChannels = event.get("channels");
+                if (rawChannels instanceof List<?> list) {
+                    for (Object c : list) {
+                        String channel = String.valueOf(c).trim();
+                        if (!channel.isEmpty() && !channels.contains(channel)) {
+                            channels.add(channel);
+                            changed = true;
+                        }
+                    }
+                }
+            }
+            if (changed) {
                 saveState(state);
             }
         }
+    }
+
+    private static void publishChannelsSnapshot(ZMQ.Socket pubSocket, Map<String, Object> state) throws Exception {
+        Map<String, Object> evt = new LinkedHashMap<>();
+        evt.put("type", "channels_snapshot");
+        evt.put("channels", new ArrayList<>(getList(state, "channels")));
+        pubSocket.sendMore(STATE_SYNC_TOPIC.getBytes(StandardCharsets.UTF_8));
+        pubSocket.send(MsgHelper.pack(evt));
     }
 
     private static Map<String, Object> map(String k, Object v) {

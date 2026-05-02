@@ -91,6 +91,8 @@ Como o broker distribui requisições entre múltiplos servidores, o estado de c
 
 - Ao criar canal com sucesso, o servidor publica evento `channel_created`.
 - Os demais servidores consomem esse evento e atualizam seu estado local.
+- Periodicamente, os servidores também publicam `channels_snapshot` para reconciliar
+  diferenças acumuladas (ex.: restart, atraso de subscribe, perda de evento).
 
 Isso evita falhas intermitentes de publicação do tipo `Canal ... nao existe`
 quando `create_channel` e `publish_message` caem em instâncias diferentes.
