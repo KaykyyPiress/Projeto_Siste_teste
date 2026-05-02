@@ -246,7 +246,8 @@ public class Servidor {
         boolean gotOk = false;
         for (Object entry : servers) {
             if (entry instanceof Map<?, ?> e) {
-                int rank = ((Number) e.getOrDefault("rank", Integer.MAX_VALUE)).intValue();
+                Object rankObj = e.containsKey("rank") ? e.get("rank") : Integer.MAX_VALUE;
+                int rank = ((Number) rankObj).intValue();
                 if (rank < myRank) {
                     Map<String, Object> reply = peerRequest((Map<String, Object>) e, mapOf("type", "election", "from", serverName, "rank", myRank));
                     if (reply != null && "ok".equals(reply.get("status"))) gotOk = true;
