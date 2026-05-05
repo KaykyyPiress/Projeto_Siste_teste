@@ -1,127 +1,68 @@
-# Projeto de Sistemas Distribuídos – Parte 4
-<!-- Arquivo reescrito para estabilizar merge da Parte 4 -->
+# Projeto de Sistemas Distribuídos — Chat com Python + Java
 
-## Objetivo
+## Introdução da Parte 4
 
-Nesta etapa foram consolidados:
+Na Parte 4, o foco foi resolver os erros de inconsistência que apareciam quando o
+broker distribuía requisições para servidores diferentes (Python e Java), como o
+clássico `Canal ... nao existe`.
 
-1. **Relógio lógico (Lamport)** em clientes/bots e servidores
-2. **Serviço de referência** para:
-   - atribuição de rank aos servidores
-   - manutenção da lista de servidores ativos
-   - atualização por heartbeat
-3. **Eleição de coordenador** entre servidores (menor rank)
-4. **Sincronização de estado de canais** entre servidores Python e Java
+### O que causava o erro
 
----
+Antes, cada servidor mantinha parte do estado localmente (principalmente canais).
+Então podia acontecer:
 
-## Arquitetura
+1. `create_channel` cair no servidor A;
+2. `publish_message` cair no servidor B;
+3. servidor B não conhecer o canal criado em A.
 
-### Plano de controle (Req/Rep)
-- Cliente ↔ Broker (`5555/5556`) ↔ Servidor
-- Servidor ↔ Referência (`5559`)
+Resultado: falhas intermitentes mesmo com sistema aparentemente "no ar".
 
-### Plano de dados (Pub/Sub)
-- Servidor (PUB) → Proxy Pub/Sub (`5557/5558`) → Clientes (SUB)
+### Como foi feito para evitar esses erros
 
----
+Foi implementada sincronização entre servidores no tópico `servers.state` com dois
+mecanismos complementares:
 
-## Portas
+- **Eventos incrementais** (`channel_created`, depois também `login_created` e
+  `publication_created`): rápida propagação logo após cada operação.
+- **Snapshot periódico** (`channels_snapshot` / `state_snapshot`): reconciliação
+  para convergir estado mesmo em restart, atraso de subscribe ou perda de evento.
 
-- Broker frontend: `5555`
-- Broker backend: `5556`
-- Pub/Sub XSUB: `5557`
-- Pub/Sub XPUB: `5558`
-- Referência: `5559`
+Além disso:
 
----
+- foi adicionada **eleição de coordenador por rank**;
+- escritas passaram a poder ser **encaminhadas ao coordenador** (`client_request`),
+  seguindo a ideia de permissão centralizada;
+- o `reference` ficou responsável por rank, liveness e metadados de peer
+  (`host`, `peer_port`).
 
-## Relógio lógico
-
-Clientes/bots e servidores mantêm um contador lógico.
-
-Regras aplicadas:
-
-1. antes de **enviar** mensagem: incrementa contador e envia no campo `logical_clock`
-2. ao **receber** mensagem: atualiza o contador para `max(local, recebido)`
-
-Todas as mensagens seguem com:
-
-- `timestamp` (relógio físico)
-- `logical_clock` (relógio lógico)
+Com isso, os servidores Python e Java convergem para o mesmo estado com muito
+menos erro intermitente.
 
 ---
 
-## Serviço de referência (Parte 4)
+## Resumo do Projeto
 
-Novo processo `reference.py` responsável por:
+Este projeto implementa um chat distribuído com múltiplos serviços em Docker,
+usando duas linguagens (Python e Java) para clientes e servidores.
 
-- `register`: cadastrar servidor e devolver `rank`
-- `list`: devolver lista `{name, rank}` dos servidores ativos
-- `heartbeat`: atualizar disponibilidade do servidor e devolver `rank`
+### Componentes principais
 
-Remoção de servidores inativos é feita por timeout de heartbeat.
+- **Broker (REQ/REP)**: encaminha chamadas de clientes para servidores.
+- **Proxy Pub/Sub (XSUB/XPUB)**: distribui mensagens publicadas nos canais.
+- **Reference service**: mantém servidores ativos, rank e dados para descoberta
+  entre peers.
+- **Servidores Python e Java**: processam login, canais e publicações.
+- **Clientes Python e Java (bots)**: executam fluxo de login/lista/criação/publicação.
 
----
+### Funcionalidades implementadas ao longo das partes
 
-## Relógio físico
+- relógio lógico de Lamport em mensagens;
+- referência com heartbeat e ranking de servidores;
+- eleição de coordenador e sincronização entre peers;
+- replicação de estado entre servidores por eventos + snapshots;
+- interoperabilidade Python ↔ Java no mesmo cluster.
 
-Nesta parte, os servidores usam o relógio local (`time.time()` no Python e
-`System.currentTimeMillis()/1000.0` no Java) para timestamps físicos.
-
----
-
-## Heartbeat e refresh do coordenador
-
-Cada servidor envia heartbeat ao serviço de referência a cada requisição processada.
-Além disso, a cada **15 mensagens processadas** (`SYNC_EVERY_MESSAGES`), consulta
-`list` no serviço de referência para atualizar a eleição de coordenador.
-
-O heartbeat mantém o servidor na lista de ativos.
-
-## Eleição de coordenador
-
-A eleição é feita com base no menor `rank` entre os servidores ativos retornados
-por `reference:list`.
-
-## Sincronização de canais entre servidores
-
-Como o broker distribui requisições entre múltiplos servidores, o estado de canais
-é sincronizado por Pub/Sub no tópico `servers.state`.
-
-- Ao criar canal com sucesso, o servidor publica evento `channel_created`.
-- Os demais servidores consomem esse evento e atualizam seu estado local.
-- Periodicamente, os servidores também publicam `channels_snapshot` para reconciliar
-  diferenças acumuladas (ex.: restart, atraso de subscribe, perda de evento).
-
-Isso evita falhas intermitentes de publicação do tipo `Canal ... nao existe`
-quando `create_channel` e `publish_message` caem em instâncias diferentes.
-
-## Parte 5 — replicação de dados
-
-Para garantir que **todos os servidores possuam todos os dados** (logins, canais e
-publicações), foi adotado um modelo de replicação baseado em:
-
-1. **eventos incrementais** no tópico `servers.state`:
-   - `login_created`
-   - `channel_created`
-   - `publication_created`
-2. **snapshot periódico de reconciliação**:
-   - `state_snapshot` com `logins`, `channels` e `publications`
-
-Com isso, mesmo que um servidor perca algum evento incremental (ou reinicie),
-ele volta a convergir no próximo snapshot periódico.
-
-### Escritas centralizadas por permissão (coordenador)
-
-Para operações de escrita (`login`, `create_channel`, `publish_message`), quando um
-servidor não é o coordenador, ele encaminha a requisição ao coordenador via REQ/REP
-interno (`client_request`). Assim, a decisão/aplicação da escrita fica centralizada
-no coordenador, preservando exclusão mútua lógica e ordem de autorização.
-
----
-
-## Execução
+### Execução
 
 Na pasta `request-reply2/src/broker`:
 
