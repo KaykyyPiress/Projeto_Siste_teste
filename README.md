@@ -3,9 +3,7 @@
 ## Integrantes
 
 - Kayky Pires
-
-> Caso o grupo tenha mais integrantes, adicione os nomes nesta seção antes da entrega final.
-
+- Rafael Dias
 ---
 
 ## Resumo do projeto
